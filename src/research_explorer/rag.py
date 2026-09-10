@@ -806,18 +806,41 @@ def fuse(*rankings: Sequence[tuple[int, float]]) -> list[tuple[int, float]]:
     return sorted(scores.items(), key=lambda item: -item[1])
 
 
-@dataclass
+@dataclass(init=False)
 class Retrieval:
-    faculty: list[dict[str, Any]] = field(default_factory=list)
-    tools: list[dict[str, Any]] = field(default_factory=list)
-    divisions: list[dict[str, Any]] = field(default_factory=list)
-    citations: list[dict[str, Any]] = field(default_factory=list)
-    confident: bool = False
-    reason: str = ""
+    faculty: list[dict[str, Any]]
+    tools: list[dict[str, Any]]
+    divisions: list[dict[str, Any]]
+    citations: list[dict[str, Any]]
+    confident: bool
+    reason: str
     #: Shape of the dense score distribution. Not a gate — see the note beside
     #: ``RELEVANCE_IS_THE_MODELS_JOB`` — but worth logging so a future threshold can be
     #: calibrated on real traffic rather than on invented questions.
-    spread: float = 0.0
+    spread: float
+
+    def __init__(
+        self,
+        faculty: list[dict[str, Any]] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        divisions: list[dict[str, Any]] | None = None,
+        citations: list[dict[str, Any]] | None = None,
+        confident: bool = False,
+        reason: str = "",
+        spread: float = 0.0,
+        *,
+        researchers: list[dict[str, Any]] | None = None,
+        organizations: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Create a retrieval result, accepting pre-0.2 keyword aliases."""
+
+        self.faculty = list(faculty if faculty is not None else researchers or [])
+        self.tools = list(tools or [])
+        self.divisions = list(divisions if divisions is not None else organizations or [])
+        self.citations = list(citations or [])
+        self.confident = confident
+        self.reason = reason
+        self.spread = spread
 
     @property
     def researchers(self) -> list[dict[str, Any]]:
