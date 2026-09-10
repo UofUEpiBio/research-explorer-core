@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from time import mktime, monotonic, sleep
 from typing import Any
@@ -23,6 +22,7 @@ from dateutil import parser as date_parser
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from research_explorer.models import CollectionResult
 from research_explorer.text import clean_text, extract_keywords
 
 USER_AGENT = "Research Explorer-Research-Monitor/0.1 (+public scientific metadata aggregator)"
@@ -37,14 +37,6 @@ HOST_MIN_INTERVAL = {
     "pub.orcid.org": 0.2,
     "api.biorxiv.org": 0.5,
 }
-
-
-@dataclass
-class CollectionResult:
-    status: str = "ok"
-    message: str = ""
-    items: list[dict[str, Any]] = field(default_factory=list)
-    overview: str = ""
 
 
 def _datetime(value: Any) -> str:
