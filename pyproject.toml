@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "research-explorer-core"
-version = "0.2.0"
+version = "0.2.1"
 description = "Reusable collection, publication, and retrieval components for research explorer sites"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Preserve `Retrieval(researchers=..., organizations=...)` as a migration-compatible
+  constructor while exposing canonical `faculty` and `divisions` fields.
+
 ## 0.2.0
 
 - Adopt a flat `divisions` and `faculty` directory schema, with legacy snapshot
