@@ -9,6 +9,7 @@ from research_explorer.models import (
     ProfileAdapter,
     Publication,
     PublicationCollector,
+    collect_directory,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "ProfileAdapter",
     "Publication",
     "PublicationCollector",
+    "collect_directory",
 ]

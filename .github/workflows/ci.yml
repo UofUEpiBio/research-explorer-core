@@ -20,4 +20,10 @@ jobs:
       - run: uv python install ${{ matrix.python }}
       - run: uv sync --all-extras --dev
       - run: uv run ruff check .
+      - run: uv run ruff format --check .
       - run: uv run pytest
+      - run: uv build
+      - run: |
+          uv venv .wheel-smoke --python ${{ matrix.python }}
+          uv pip install --python .wheel-smoke/bin/python dist/*.whl
+          .wheel-smoke/bin/python -c "import research_explorer, research_explorer.collectors, research_explorer.works, research_explorer.rag"

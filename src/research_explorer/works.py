@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from calendar import monthrange
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -23,6 +24,7 @@ import feedparser
 import requests
 
 from research_explorer.collectors import SourceClient
+from research_explorer.models import normalize_directory
 from research_explorer.text import clean_text
 
 SCHEMA_VERSION = 2
@@ -43,8 +45,13 @@ ARXIV_DOI_PREFIX = "10.48550/arxiv."
 
 # Crossref is queried one DOI at a time, so bound how much of a single run it can take.
 MAX_CROSSREF_LOOKUPS = 3000
-# Crossref routes polite-pool traffic by contact address; override for a real deployment.
-CROSSREF_CONTACT = os.getenv("RESEARCH_EXPLORER_CONTACT_EMAIL", "research_explorer-bot@users.noreply.github.com")
+
+
+def _contact_email() -> str:
+    """Read a deployment contact at request time; never impersonate a contact."""
+
+    value = os.getenv("RESEARCH_EXPLORER_CONTACT_EMAIL", "").strip()
+    return value if "@" in value and " " not in value else ""
 
 
 @dataclass
@@ -92,7 +99,7 @@ def _date_parts(year: Any, month: Any = "", day: Any = "") -> str:
     day_text = re.sub(r"\D", "", str(day or "")) or "1"
     try:
         parsed = datetime(int(year_text), min(max(int(month_text), 1), 12), 1, tzinfo=UTC)
-        day_number = min(max(int(day_text), 1), 28 if parsed.month == 2 else 30)
+        day_number = min(max(int(day_text), 1), monthrange(parsed.year, parsed.month)[1])
     except (TypeError, ValueError):
         return ""
     return f"{parsed.year:04d}-{parsed.month:02d}-{day_number:02d}"
@@ -209,8 +216,8 @@ def _work_record(**values: Any) -> dict[str, Any]:
         "authors": authors[:MAX_AUTHORS],
         "author_count": len(authors),
         "sources": [values["source"]] if values.get("source") else [],
-        "researcher_ids": [],
-        "organization_ids": [],
+        "faculty_ids": [],
+        "division_ids": [],
     }
 
 
@@ -224,7 +231,11 @@ def work_keys(record: dict[str, Any]) -> list[str]:
         keys.append(f"pmid:{record['pmid']}")
     if record.get("arxiv_id"):
         keys.append(f"arxiv:{record['arxiv_id'].lower()}")
-    title = re.sub(r"[^a-z0-9]+", "", str(record.get("title", "")).lower())
+    # A title is only a fallback identity. Two independently identified records with
+    # the same title may be distinct publications (for example a correction).
+    title = ""
+    if not keys:
+        title = re.sub(r"[^a-z0-9]+", "", str(record.get("title", "")).lower())
     if title:
         keys.append(f"title:{title[:120]}")
     return keys
@@ -234,6 +245,23 @@ def _work_id(record: dict[str, Any]) -> str:
     keys = work_keys(record)
     seed = keys[0] if keys else repr(sorted(record.items()))
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
+
+
+def _faculty_ids(work: dict[str, Any]) -> list[str]:
+    return list(work.get("faculty_ids") or work.get("researcher_ids") or [])
+
+
+def _division_ids(work: dict[str, Any]) -> list[str]:
+    return list(work.get("division_ids") or work.get("organization_ids") or [])
+
+
+def _set_relations(work: dict[str, Any], faculty_ids: list[str], division_ids: list[str]) -> None:
+    """Write canonical fields and temporary aliases for pre-0.2 consumers."""
+
+    work["faculty_ids"] = list(dict.fromkeys(faculty_ids))
+    work["division_ids"] = list(dict.fromkeys(division_ids))
+    work["researcher_ids"] = work["faculty_ids"]
+    work["organization_ids"] = work["division_ids"]
 
 
 def _merge_into(target: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
@@ -486,7 +514,13 @@ def collect_orcid_works(
 
 
 def _eutils_params() -> dict[str, str]:
-    params = {"db": "pubmed", "tool": "research_explorer-dashboard", "email": "research_explorer-bot@example.org"}
+    params = {
+        "db": "pubmed",
+        "tool": os.getenv("RESEARCH_EXPLORER_NCBI_TOOL", "research-explorer"),
+    }
+    email = _contact_email()
+    if email:
+        params["email"] = email
     key = os.getenv("NCBI_API_KEY", "").strip()
     if key:
         params["api_key"] = key
@@ -583,6 +617,11 @@ def _pubmed_fetch(
 def collect_pubmed(
     client: SourceClient, researcher: dict[str, Any], limits: dict[str, int]
 ) -> WorksResult:
+    if not _contact_email():
+        return WorksResult(
+            status="skipped",
+            message="Set RESEARCH_EXPLORER_CONTACT_EMAIL before collecting from PubMed",
+        )
     query = researcher.get("pubmed_query", "").strip()
     identifier = researcher.get("orcid_id", "")
     if not query and identifier:
@@ -784,7 +823,7 @@ def _enrich_via_crossref(
             response = client.get(
                 f"{CROSSREF_API}/{work['doi']}",
                 respect_robots=False,
-                params={"mailto": CROSSREF_CONTACT},
+                params={"mailto": _contact_email()} if _contact_email() else {},
             )
             payload = response.json().get("message", {})
         except (requests.RequestException, ValueError):
@@ -884,6 +923,9 @@ def collect_researcher_works(
         health.append(
             {
                 "source_id": f"{organization['id']}:{researcher['id']}:{source_type}",
+                "division_id": organization["id"],
+                "faculty_id": researcher["id"],
+                "faculty_name": researcher.get("full_name", ""),
                 "organization_id": organization["id"],
                 "researcher_id": researcher["id"],
                 "researcher_name": researcher.get("full_name", ""),
@@ -898,8 +940,7 @@ def collect_researcher_works(
 
     works = list({id(work): work for work in collected.values()}.values())
     for work in works:
-        work["researcher_ids"] = [researcher["id"]]
-        work["organization_ids"] = [organization["id"]]
+        _set_relations(work, [researcher["id"]], [organization["id"]])
     return works, health
 
 
@@ -977,8 +1018,8 @@ def _merge_works_history(
     # work survives when it is recent enough for any one of its authors.
     by_researcher: dict[str, list[dict[str, Any]]] = {}
     for work in retained:
-        for researcher_id in work.get("researcher_ids", []) or ["__unattributed__"]:
-            by_researcher.setdefault(researcher_id, []).append(work)
+        for faculty_id in _faculty_ids(work) or ["__unattributed__"]:
+            by_researcher.setdefault(faculty_id, []).append(work)
 
     keep: set[str] = set()
     for works in by_researcher.values():
@@ -999,39 +1040,51 @@ def build_works_snapshot(
     client: SourceClient | None = None,
     previous_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Collect works for every researcher, isolating individual source failures."""
+    """Collect publications for every faculty member, isolating source failures.
+
+    Legacy profile snapshots are normalized once here. The returned snapshot uses
+    ``faculty_ids`` and ``division_ids``; the old names remain aliases during the
+    migration so existing sites can upgrade the core package independently.
+    """
 
     client = client or SourceClient()
     generated_at = _now()
-    network = profiles.get("network", {})
+    directory = normalize_directory(profiles)
+    settings = directory["settings"]
     limits = {
-        "max_works": int(network.get("max_works_per_researcher", 100)),
-        "abstract_limit": int(network.get("abstract_max_chars", 1500)),
+        "max_works": int(
+            settings.get(
+                "max_publications_per_faculty", settings.get("max_works_per_researcher", 100)
+            )
+        ),
+        "abstract_limit": int(settings.get("abstract_max_chars", 1500)),
     }
 
     by_key: dict[str, dict[str, Any]] = {}
     health: list[dict[str, Any]] = []
-    for organization in profiles.get("organizations", []):
-        for researcher in organization.get("researchers", []):
-            if not researcher.get("collect_works", True):
-                continue
-            works, researcher_health = collect_researcher_works(
-                client, researcher, organization, limits
-            )
-            health.extend(researcher_health)
-            for work in works:
-                existing = next((by_key[key] for key in work_keys(work) if key in by_key), None)
-                if existing:
-                    _merge_into(existing, work)
-                    existing["researcher_ids"] = list(
-                        dict.fromkeys(existing["researcher_ids"] + work["researcher_ids"])
-                    )
-                    existing["organization_ids"] = list(
-                        dict.fromkeys(existing["organization_ids"] + work["organization_ids"])
-                    )
-                    work = existing
-                for key in work_keys(work):
-                    by_key[key] = work
+    divisions = {item["id"]: item for item in directory["divisions"]}
+    for faculty in directory["faculty"]:
+        if not faculty.get("collect_publications", True):
+            continue
+        division_ids = list(faculty.get("division_ids") or [])
+        division = divisions.get(division_ids[0], {"id": "unassigned", "name": "Unassigned"})
+        works, faculty_health = collect_researcher_works(client, faculty, division, limits)
+        # Faculty may belong to more than one division; attribute every result to all.
+        for work in works:
+            _set_relations(work, [faculty["id"]], division_ids or [division["id"]])
+        health.extend(faculty_health)
+        for work in works:
+            existing = next((by_key[key] for key in work_keys(work) if key in by_key), None)
+            if existing:
+                _merge_into(existing, work)
+                _set_relations(
+                    existing,
+                    _faculty_ids(existing) + _faculty_ids(work),
+                    _division_ids(existing) + _division_ids(work),
+                )
+                work = existing
+            for key in work_keys(work):
+                by_key[key] = work
 
     collected = [
         work for work in {id(work): work for work in by_key.values()}.values() if is_citable(work)
@@ -1044,14 +1097,14 @@ def build_works_snapshot(
         collected,
         previous_snapshot,
         generated_at,
-        int(network.get("works_retention_years", 15)),
+        int(settings.get("publication_retention_years", settings.get("works_retention_years", 15))),
         limits["max_works"],
     )
 
-    researcher_counts: dict[str, int] = {}
+    faculty_counts: dict[str, int] = {}
     for work in works:
-        for researcher_id in work.get("researcher_ids", []):
-            researcher_counts[researcher_id] = researcher_counts.get(researcher_id, 0) + 1
+        for faculty_id in _faculty_ids(work):
+            faculty_counts[faculty_id] = faculty_counts.get(faculty_id, 0) + 1
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1062,12 +1115,14 @@ def build_works_snapshot(
             "with_abstract": sum(bool(work.get("abstract")) for work in works),
             "with_doi": sum(bool(work.get("doi")) for work in works),
             "with_pmid": sum(bool(work.get("pmid")) for work in works),
-            "researchers_with_works": len(researcher_counts),
+            "faculty_with_publications": len(faculty_counts),
+            "researchers_with_works": len(faculty_counts),
             "sources_ok": sum(row["status"] == "ok" for row in health),
             "sources_attention": sum(row["status"] in {"error", "blocked"} for row in health),
         },
         "enrichment": enrichment,
-        "works_per_researcher": researcher_counts,
+        "publications_per_faculty": faculty_counts,
+        "works_per_researcher": faculty_counts,
         "works": works,
         "health": health,
     }

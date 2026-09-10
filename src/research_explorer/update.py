@@ -11,8 +11,12 @@ from research_explorer import rag
 
 def parse_rag_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rebuild a research-explorer retrieval index")
-    parser.add_argument("--profiles", default="data/profiles.json")
-    parser.add_argument("--works", default="data/works.json")
+    parser.add_argument(
+        "--directory", "--profiles", dest="directory", default="data/directory.json"
+    )
+    parser.add_argument(
+        "--publications", "--works", dest="publications", default="data/publications.json"
+    )
     parser.add_argument("--details", default="")
     parser.add_argument("--output-dir", default="data/rag")
     parser.add_argument("--dims", type=int, default=rag.DEFAULT_DIMS)
@@ -33,15 +37,17 @@ def _read_json(path: str) -> dict | None:
 
 def rag_main(argv: list[str] | None = None) -> int:
     args = parse_rag_args(argv)
-    profiles = _read_json(args.profiles)
-    works = _read_json(args.works)
-    if profiles is None or works is None:
-        print(f"Missing {args.profiles} or {args.works}")
+    directory = _read_json(args.directory)
+    works = _read_json(args.publications)
+    if directory is None or works is None:
+        print(f"Missing {args.directory} or {args.publications}")
         return 1
 
-    details_path = args.details or str(Path(args.works).with_name("works-details.json"))
+    details_path = args.details or str(
+        Path(args.publications).with_name("publications-details.json")
+    )
     details = _read_json(details_path) or {"details": {}}
-    chunks = rag.build_chunks(profiles, works, details)
+    chunks = rag.build_chunks(directory, works, details)
     previous = None if args.replace else rag.read_index(args.output_dir)
     if args.dry_run:
         known = {chunk["id"]: chunk["hash"] for chunk in previous.chunks} if previous else {}

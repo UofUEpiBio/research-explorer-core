@@ -227,6 +227,34 @@ def test_chunk_kinds_cover_the_directory() -> None:
     assert kinds == {"work", "researcher", "tool", "organization"}
 
 
+def test_flat_directory_builds_faculty_and_division_chunks() -> None:
+    directory = {
+        "divisions": [{"id": "epi", "name": "Epidemiology"}],
+        "faculty": [
+            {
+                "id": "ada",
+                "full_name": "Ada Lovelace",
+                "profile_url": "https://example.test/ada",
+                "division_ids": ["epi"],
+            }
+        ],
+    }
+    publications = {
+        "works": [
+            {
+                "id": "paper",
+                "title": "Causal inference",
+                "faculty_ids": ["ada"],
+                "division_ids": ["epi"],
+            }
+        ]
+    }
+    chunks = {chunk["id"]: chunk for chunk in rag.build_chunks(directory, publications)}
+    assert chunks["r:ada"]["faculty_ids"] == ["ada"]
+    assert chunks["r:ada"]["division_ids"] == ["epi"]
+    assert chunks["w:paper"]["faculty_ids"] == ["ada"]
+
+
 # ----------------------------------------------------------------------------------
 # Vectors and incremental reuse
 # ----------------------------------------------------------------------------------
@@ -497,7 +525,7 @@ def test_agreement_is_not_demanded_beyond_the_available_candidates(tmp_path: Pat
 
 
 def test_a_plural_query_matches_the_singular_term(tmp_path: Path) -> None:
-    """"dashboards" must find a paper about a *dashboard*."""
+    """ "dashboards" must find a paper about a *dashboard*."""
 
     works = _works(_work("a1", "An interactive dashboard for outbreak reporting"))
     index = _loaded(_profiles(), works, tmp_path=tmp_path)
@@ -692,14 +720,16 @@ def test_dry_run_makes_no_api_calls(tmp_path: Path, capsys) -> None:
 
 
 def test_missing_snapshots_are_reported(tmp_path: Path, capsys) -> None:
-    code = rag_main(["--profiles", str(tmp_path / "nope.json"), "--works", str(tmp_path / "no.json")])
+    code = rag_main(
+        ["--profiles", str(tmp_path / "nope.json"), "--works", str(tmp_path / "no.json")]
+    )
     assert code == 1
     assert "Missing" in capsys.readouterr().out
 
 
 def test_rag_arguments_default_to_the_published_snapshots() -> None:
     args = parse_rag_args([])
-    assert args.profiles == "data/profiles.json"
-    assert args.works == "data/works.json"
+    assert args.directory == "data/directory.json"
+    assert args.publications == "data/publications.json"
     assert args.output_dir == "data/rag"
     assert args.dims == rag.DEFAULT_DIMS

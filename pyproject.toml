@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "research-explorer-core"
-version = "0.1.2"
+version = "0.2.0"
 description = "Reusable collection, publication, and retrieval components for research explorer sites"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "UofUEpiBio" }]
 dependencies = [
   "beautifulsoup4>=4.12,<5",
@@ -21,8 +22,14 @@ dependencies = [
 rag = ["google-genai>=1.0,<2", "numpy>=1.26,<3"]
 dev = ["pytest>=9.0.3,<10", "ruff>=0.6,<1"]
 
+[project.scripts]
+research-explorer-rag = "research_explorer.update:rag_main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+research_explorer = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,22 +1,14 @@
 """Retrieval index behind the "Ask Research Explorer" assistant.
 
-This module is deliberately shared between the offline builder (``research_explorer-rag``)
+This module is deliberately shared between the offline builder (``research-explorer-rag``)
 and the online service. Both call the same ``search`` path, so the ranking you tune
 with ``research_explorer-rag --query`` is the ranking visitors get — there is no second
 implementation to drift out of step.
 
-Two properties of the corpus shape everything here:
-
-* Researcher prose is generic. Every researcher now carries a short bio, but they run
-  about 160 characters of institutional summary and draw on a vocabulary of only ~770
-  distinct words. They describe domains, not the topics people search for: across all
-  471 bios, "ERGM" appears 0 times, "Ebola" once and "Bayesian" once, against 3, 54 and
-  49 occurrences in publication titles. So ``_researcher_chunk`` synthesizes a record
-  from the topics and titles of that person's publications; the bio is a useful opener,
-  never the substance.
-* Publication counts are wildly uneven, from zero to a hundred. A roll-up that summed
-  every matching paper would hand each query to whoever publishes most, so
-  ``roll_up`` counts only a person's best few matches.
+Faculty bios can be general institutional summaries rather than the methods and topics
+that visitors search for. Faculty chunks therefore combine a bio with topics and titles
+from their publications. Roll-ups count only each person's best few matches so a
+prolific author does not win every query by volume alone.
 """
 
 from __future__ import annotations
@@ -36,6 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from research_explorer.models import normalize_directory
 from research_explorer.text import clean_text, extract_keywords
 
 SCHEMA_VERSION = 1
@@ -232,7 +225,9 @@ def chunk_text(chunk: dict[str, Any]) -> str:
             f"Authors: {authors}" if authors else "",
         )
     elif kind == "researcher":
-        heading = " — ".join(p for p in (chunk.get("role") or "", chunk.get("affiliation") or "") if p)
+        heading = " — ".join(
+            p for p in (chunk.get("role") or "", chunk.get("affiliation") or "") if p
+        )
         expertise = "; ".join(chunk.get("expertise") or [])
         topics = "; ".join(chunk.get("topics") or [])
         recent = "; ".join(chunk.get("recent_titles") or [])
@@ -245,7 +240,9 @@ def chunk_text(chunk: dict[str, Any]) -> str:
             f"Recent work: {recent}" if recent else "",
         )
     elif kind == "tool":
-        status = " — ".join(p for p in (chunk.get("category") or "", chunk.get("status") or "") if p)
+        status = " — ".join(
+            p for p in (chunk.get("category") or "", chunk.get("status") or "") if p
+        )
         body = _lines(
             title,
             status,
@@ -272,6 +269,19 @@ def _finish(chunk: dict[str, Any]) -> dict[str, Any]:
     return chunk
 
 
+def _relations(faculty_ids: Sequence[str], division_ids: Sequence[str]) -> dict[str, list[str]]:
+    """Canonical relationship fields plus read-only migration aliases."""
+
+    faculty = list(faculty_ids)
+    divisions = list(division_ids)
+    return {
+        "faculty_ids": faculty,
+        "division_ids": divisions,
+        "researcher_ids": faculty,
+        "organization_ids": divisions,
+    }
+
+
 def _work_chunk(work: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
     return _finish(
         {
@@ -283,8 +293,10 @@ def _work_chunk(work: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
             "authors": _joined(
                 author.get("name") or "" for author in (detail.get("authors") or [])[:WORK_AUTHORS]
             ),
-            "researcher_ids": list(work.get("researcher_ids") or []),
-            "organization_ids": list(work.get("organization_ids") or []),
+            **_relations(
+                work.get("faculty_ids") or work.get("researcher_ids") or [],
+                work.get("division_ids") or work.get("organization_ids") or [],
+            ),
             "year": work.get("year") or 0,
             "venue": sanitize(work.get("venue") or ""),
             "url": work.get("url") or "",
@@ -318,18 +330,16 @@ def _researcher_chunk(
             "kind": "researcher",
             "title": sanitize(researcher.get("full_name") or researcher["id"]),
             "bio": sanitize(strip_bio_note(researcher.get("bio") or "")),
-            "role": sanitize(researcher.get("role") or ""),
+            "role": sanitize(researcher.get("title") or researcher.get("role") or ""),
             "affiliation": sanitize(organization.get("name") or ""),
             "expertise": _joined(researcher.get("expertise") or []),
-            "topics": extract_keywords(topic_parts, limit=RESEARCHER_TOPICS)
-            if topic_parts
-            else [],
-            "recent_titles": _joined(
-                work.get("title") or "" for work in works[:RESEARCHER_TITLES]
-            ),
-            "researcher_ids": [researcher["id"]],
-            "organization_ids": [organization["id"]],
-            "url": researcher.get("website") or researcher.get("orcid") or "",
+            "topics": extract_keywords(topic_parts, limit=RESEARCHER_TOPICS) if topic_parts else [],
+            "recent_titles": _joined(work.get("title") or "" for work in works[:RESEARCHER_TITLES]),
+            **_relations([researcher["id"]], [organization["id"]]),
+            "url": researcher.get("profile_url")
+            or researcher.get("website")
+            or researcher.get("orcid")
+            or "",
             "work_count": len(works),
         }
     )
@@ -346,8 +356,7 @@ def _tool_chunk(tool: dict[str, Any], organization: dict[str, Any]) -> dict[str,
             "status": sanitize(tool.get("status") or ""),
             "affiliation": sanitize(organization.get("name") or ""),
             "keywords": _joined(tool.get("keywords") or []),
-            "researcher_ids": [],
-            "organization_ids": [organization["id"]],
+            **_relations([], [organization["id"]]),
             "url": tool.get("url") or tool.get("repository") or "",
         }
     )
@@ -363,20 +372,21 @@ def _organization_chunk(organization: dict[str, Any]) -> dict[str, Any]:
             "snippet": sanitize(organization.get("summary") or "", SNIPPET_LIMIT),
             "focus_areas": _joined(organization.get("focus_areas") or []),
             "keywords": _joined(organization.get("keywords") or []),
-            "researcher_ids": [],
-            "organization_ids": [organization["id"]],
+            **_relations([], [organization["id"]]),
             "url": organization.get("website") or "",
         }
     )
 
 
-def _works_by_researcher(works: Sequence[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _works_by_faculty(works: Sequence[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for work in works:
-        for researcher_id in work.get("researcher_ids") or []:
-            grouped[researcher_id].append(work)
+        for faculty_id in work.get("faculty_ids") or work.get("researcher_ids") or []:
+            grouped[faculty_id].append(work)
     for records in grouped.values():
-        records.sort(key=lambda work: (work.get("published_at") or "", work.get("id") or ""), reverse=True)
+        records.sort(
+            key=lambda work: (work.get("published_at") or "", work.get("id") or ""), reverse=True
+        )
     return grouped
 
 
@@ -389,17 +399,26 @@ def build_chunks(
 
     details = (works_details or {}).get("details") or {}
     works = list(works_index.get("works") or [])
-    grouped = _works_by_researcher(works)
+    grouped = _works_by_faculty(works)
 
     chunks = [_work_chunk(work, details.get(work["id"], {})) for work in works]
-    for organization in profiles.get("organizations") or []:
-        chunks.append(_organization_chunk(organization))
-        for tool in organization.get("tools") or []:
-            chunks.append(_tool_chunk(tool, organization))
-        for researcher in organization.get("researchers") or []:
-            chunks.append(
-                _researcher_chunk(researcher, organization, grouped.get(researcher["id"], []))
-            )
+    directory = normalize_directory(profiles)
+    divisions = {division["id"]: division for division in directory["divisions"]}
+    for division in divisions.values():
+        chunks.append(_organization_chunk(division))
+    # Tools were part of the retired center schema. Preserve them only while reading a
+    # legacy snapshot; the canonical directory deliberately has no tool collection.
+    if "organizations" in profiles and "divisions" not in profiles:
+        for organization in profiles.get("organizations") or []:
+            division = divisions.get(organization.get("id"), organization)
+            for tool in organization.get("tools") or []:
+                chunks.append(_tool_chunk(tool, division))
+    for faculty in directory["faculty"]:
+        division_ids = faculty.get("division_ids") or []
+        division = divisions.get(division_ids[0], {"id": "unassigned", "name": "Unassigned"})
+        chunk = _researcher_chunk(faculty, division, grouped.get(faculty["id"], []))
+        chunk.update(_relations([faculty["id"]], division_ids))
+        chunks.append(_finish(chunk))
     chunks.sort(key=lambda chunk: chunk["id"])
     return chunks
 
@@ -543,7 +562,9 @@ def _write_atomic(text: str, output: Path) -> None:
             os.unlink(temporary_name)
 
 
-def write_index(result: BuildResult, directory: str | Path, sources: dict[str, Any] | None = None) -> dict[str, Any]:
+def write_index(
+    result: BuildResult, directory: str | Path, sources: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Write the three index files, sorted by id so git sees a minimal diff."""
 
     directory = Path(directory)
@@ -567,7 +588,9 @@ def write_index(result: BuildResult, directory: str | Path, sources: dict[str, A
     }
     _write_atomic(chunk_lines, directory / CHUNKS_NAME)
     _write_atomic(vector_lines, directory / VECTORS_NAME)
-    _write_atomic(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", directory / MANIFEST_NAME)
+    _write_atomic(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", directory / MANIFEST_NAME
+    )
     return manifest
 
 
@@ -581,7 +604,9 @@ def read_index(directory: str | Path) -> BuildResult | None:
         return None
     try:
         chunks = [
-            json.loads(line) for line in chunks_path.read_text(encoding="utf-8").splitlines() if line
+            json.loads(line)
+            for line in chunks_path.read_text(encoding="utf-8").splitlines()
+            if line
         ]
         vectors: dict[str, str] = {}
         if vectors_path.exists():
@@ -692,9 +717,7 @@ def bm25(index: Index, terms: Sequence[str], limit: int = CANDIDATES) -> list[tu
     scores: dict[int, float] = defaultdict(float)
     for term in set(terms):
         frequency = index._document_frequency.get(term, 0)
-        if not frequency or frequency > max(
-            MIN_COMMON_DOCUMENTS, total * MAX_DOCUMENT_FREQUENCY
-        ):
+        if not frequency or frequency > max(MIN_COMMON_DOCUMENTS, total * MAX_DOCUMENT_FREQUENCY):
             continue
         weight = math.log(1 + (total - frequency + 0.5) / (frequency + 0.5))
         for position, counts in enumerate(index._frequencies):
@@ -765,9 +788,7 @@ def dense(index: Index, query_vector: Sequence[float], limit: int = CANDIDATES) 
     mean = sum(values) / len(values)
     deviation = math.sqrt(sum((v - mean) ** 2 for v in values) / len(values))
     scored.sort(key=lambda item: (-item[1], index.chunks[item[0]]["id"]))
-    return DenseRanking(
-        ranked=scored[:limit], top=max(values), mean=mean, deviation=deviation
-    )
+    return DenseRanking(ranked=scored[:limit], top=max(values), mean=mean, deviation=deviation)
 
 
 def fuse(*rankings: Sequence[tuple[int, float]]) -> list[tuple[int, float]]:
@@ -787,9 +808,9 @@ def fuse(*rankings: Sequence[tuple[int, float]]) -> list[tuple[int, float]]:
 
 @dataclass
 class Retrieval:
-    researchers: list[dict[str, Any]] = field(default_factory=list)
+    faculty: list[dict[str, Any]] = field(default_factory=list)
     tools: list[dict[str, Any]] = field(default_factory=list)
-    organizations: list[dict[str, Any]] = field(default_factory=list)
+    divisions: list[dict[str, Any]] = field(default_factory=list)
     citations: list[dict[str, Any]] = field(default_factory=list)
     confident: bool = False
     reason: str = ""
@@ -797,6 +818,18 @@ class Retrieval:
     #: ``RELEVANCE_IS_THE_MODELS_JOB`` — but worth logging so a future threshold can be
     #: calibrated on real traffic rather than on invented questions.
     spread: float = 0.0
+
+    @property
+    def researchers(self) -> list[dict[str, Any]]:
+        """Deprecated migration alias for :attr:`faculty`."""
+
+        return self.faculty
+
+    @property
+    def organizations(self) -> list[dict[str, Any]]:
+        """Deprecated migration alias for :attr:`divisions`."""
+
+        return self.divisions
 
 
 def roll_up(index: Index, fused: Sequence[tuple[int, float]]) -> list[dict[str, Any]]:
@@ -864,7 +897,11 @@ def roll_up_organizations(index: Index, fused: Sequence[tuple[int, float]]) -> l
         score = direct.get(organization_id, 0.0) + sum(
             value / math.sqrt(rank + 1) for rank, (value, _position) in enumerate(best)
         )
-        profile = index.chunks[index.by_id[f"o:{organization_id}"]] if f"o:{organization_id}" in index.by_id else {}
+        profile = (
+            index.chunks[index.by_id[f"o:{organization_id}"]]
+            if f"o:{organization_id}" in index.by_id
+            else {}
+        )
         ranked.append(
             {
                 "id": organization_id,
@@ -904,13 +941,13 @@ def search(
     people = roll_up(index, fused)[:TOP_RESEARCHERS]
 
     citation_ids: list[str] = []
-    researchers: list[dict[str, Any]] = []
+    faculty: list[dict[str, Any]] = []
     for person in people:
         position = index.by_id.get(f"r:{person['id']}")
         profile = index.chunks[position] if position is not None else {}
         chosen = person["evidence"][:EVIDENCE_PER_RESEARCHER]
         citation_ids.extend(chosen)
-        researchers.append(
+        faculty.append(
             {
                 "id": person["id"],
                 "name": profile.get("title", person["id"]),
@@ -950,7 +987,9 @@ def search(
         names = []
         for organization_id in chunk.get("organization_ids") or []:
             position = index.by_id.get(f"o:{organization_id}")
-            names.append(index.chunks[position]["title"] if position is not None else organization_id)
+            names.append(
+                index.chunks[position]["title"] if position is not None else organization_id
+            )
         return names
 
     tools = [
@@ -973,13 +1012,13 @@ def search(
     # A tool-shaped question can rank the right software and the right center without
     # crediting a single person. That is still a useful answer, so refuse only when
     # nothing at all came back.
-    if not researchers and not tools and not organizations:
+    if not faculty and not tools and not organizations:
         return Retrieval(reason="no_match")
 
     return Retrieval(
-        researchers=researchers,
+        faculty=faculty,
         tools=tools,
-        organizations=organizations,
+        divisions=organizations,
         citations=citations,
         confident=True,
         spread=round(semantic.deviation, 5),

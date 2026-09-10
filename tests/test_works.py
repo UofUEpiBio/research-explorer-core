@@ -3,6 +3,8 @@ import pytest
 from research_explorer import works
 from research_explorer.works import (
     WorksResult,
+    _date_parts,
+    _eutils_params,
     _finalize_type,
     _merge_into,
     _merge_works_history,
@@ -140,7 +142,30 @@ def test_records_with_no_identifier_or_link_are_dropped() -> None:
 
 def test_work_keys_allow_recognizing_a_record_by_any_identifier() -> None:
     record = _work_record(title="Title Here!", doi="10.1/ab", pmid="123456")
-    assert work_keys(record) == ["doi:10.1/ab", "pmid:123456", "title:titlehere"]
+    assert work_keys(record) == ["doi:10.1/ab", "pmid:123456"]
+
+
+def test_same_title_with_distinct_identifiers_is_not_deduplicated() -> None:
+    first = _work_record(title="Correction", doi="10.1/first")
+    second = _work_record(title="Correction", doi="10.1/second")
+    assert not set(work_keys(first)).intersection(work_keys(second))
+
+
+@pytest.mark.parametrize(
+    ("year", "month", "day", "expected"),
+    [(2024, 1, 31, "2024-01-31"), (2024, 2, 29, "2024-02-29"), (2025, 2, 29, "2025-02-28")],
+)
+def test_date_parts_preserves_calendar_days(year, month, day, expected) -> None:
+    assert _date_parts(year, month, day) == expected
+
+
+def test_ncbi_contact_is_configured_at_request_time(monkeypatch) -> None:
+    monkeypatch.delenv("RESEARCH_EXPLORER_CONTACT_EMAIL", raising=False)
+    assert "email" not in _eutils_params()
+    monkeypatch.setenv("RESEARCH_EXPLORER_CONTACT_EMAIL", "doim-web@utah.edu")
+    monkeypatch.setenv("RESEARCH_EXPLORER_NCBI_TOOL", "doim-explorer")
+    assert _eutils_params()["email"] == "doim-web@utah.edu"
+    assert _eutils_params()["tool"] == "doim-explorer"
 
 
 def test_history_keeps_previous_works_and_stable_ids() -> None:
@@ -283,6 +308,30 @@ def test_a_shared_work_lists_every_coauthor_in_the_network(monkeypatch) -> None:
     assert snapshot["works"][0]["researcher_ids"] == ["first", "second"]
     assert snapshot["stats"]["researchers_with_works"] == 2
     assert snapshot["works_per_researcher"] == {"first": 1, "second": 1}
+
+
+def test_flat_directory_drives_canonical_publication_fields(monkeypatch) -> None:
+    directory = {
+        "settings": {"max_publications_per_faculty": 10},
+        "divisions": [{"id": "epi", "name": "Epidemiology"}],
+        "faculty": [{"id": "ada", "full_name": "Ada", "division_ids": ["epi"]}],
+    }
+    monkeypatch.setattr(
+        "research_explorer.works.WORK_COLLECTORS",
+        (
+            (
+                "orcid",
+                "ORCID",
+                lambda *_args: WorksResult(works=[_work_record(title="Paper", doi="10.1/paper")]),
+            ),
+        ),
+    )
+    monkeypatch.setattr("research_explorer.works.enrich_works", lambda *_args: {})
+
+    snapshot = build_works_snapshot(directory, client=object())
+    assert snapshot["works"][0]["faculty_ids"] == ["ada"]
+    assert snapshot["works"][0]["division_ids"] == ["epi"]
+    assert snapshot["publications_per_faculty"] == {"ada": 1}
 
 
 def test_source_failures_are_isolated_per_researcher(monkeypatch) -> None:
