@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "research-explorer-core"
+version = "0.1.0"
+description = "Reusable collection, publication, and retrieval components for research explorer sites"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "UofUEpiBio" }]
+dependencies = [
+  "beautifulsoup4>=4.12,<5",
+  "feedparser>=6.0,<7",
+  "python-dateutil>=2.9,<3",
+  "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+rag = ["google-genai>=1.0,<2", "numpy>=1.26,<3"]
+dev = ["pytest>=9.0.3,<10", "ruff>=0.6,<1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
